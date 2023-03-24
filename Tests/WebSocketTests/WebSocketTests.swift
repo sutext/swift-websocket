@@ -42,7 +42,7 @@ final class CustomPinging:NSObject,WebSocketPinging{
     }
 }
 class Client{
-    let socket:WebSocket = .init(URL(string: "wss://web.example.com")!)
+    let socket:WebSocket = .init("wss://web.example.com:8080")
     init(){
         self.socket.delegate = self
         self.socket.retrier = WebSocket.Retrier(.linear(scale: 0.5),limits: 10)//usubg default retrier

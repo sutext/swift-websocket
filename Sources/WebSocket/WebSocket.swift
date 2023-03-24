@@ -32,6 +32,8 @@ public extension WebSocketDelegate{
 }
 
 /// WebSocket ping pong protocol @see `WebSocket.Pinging` for implementation
+///
+///- Important All function will be call in `socket.queue`. It's best not to call directly
 public protocol WebSocketPinging{
     init(_ socket:WebSocket)
     func onRecive(message:WebSocket.Message)
@@ -41,7 +43,7 @@ public protocol WebSocketPinging{
 
 // MARK: - Public definition
 /// A WebSocket implementation on iOS13 base on URLSessionWebSocketTask
-/// Add auto ping pong and keep alive implementation
+/// Add auto ping pong and retry implementation
 public final class WebSocket{
     private let session:Session
     /// Internal monitor implementation
@@ -77,7 +79,7 @@ public final class WebSocket{
     }
     /// update the internal session configuration
     public func update(config:(URLSessionConfiguration)->Void){
-        config(session.session.configuration)
+        config(session.impl.configuration)
     }
     /// Open the websocket connecction
     public func open(){
@@ -104,11 +106,11 @@ public final class WebSocket{
     }
     /// send string message
     public func send(message:String,finish:((Swift.Error?)->Void)? = nil){
-        self.send(message: .string(message),finish: finish)
+        send(message: .string(message),finish: finish)
     }
     /// Send binary data
     public func send(data:Data,finish:((Swift.Error?)->Void)? = nil){
-        self.send(message: .data(data),finish: finish)
+        send(message: .data(data),finish: finish)
     }
     /// Send message to the server
     public func send(message:Message,finish:((Swift.Error?)->Void)? = nil){
@@ -176,9 +178,9 @@ extension WebSocket{
         case pinging
         /// auto close by network monitor when network unsatisfied
         case monitor
-        /// close when network layer error
+        /// close when network layer error. `String is error message`
         case error(String)
-        /// close when server error
+        /// close when server reason `Data is server close reason data`
         case server(Data?)
         /// create from error
         public init(error:Swift.Error){
@@ -248,7 +250,7 @@ extension WebSocket{
         init(_ request:URLRequest) {
             self.request = request
         }
-        lazy var session:URLSession = {
+        lazy var impl:URLSession = {
             let config = URLSessionConfiguration.default
             config.httpShouldUsePipelining = true
             let queue = OperationQueue()
@@ -258,11 +260,11 @@ extension WebSocket{
             return URLSession(configuration: config,delegate: self,delegateQueue: queue)
         }()
         func open(){
-            guard case .closed = self.status else {
+            guard case .closed = status else {
                 return
             }
             self.status = .opening
-            self.task = self.session.webSocketTask(with:request)
+            self.task = self.impl.webSocketTask(with:self.request)
             self.task?.resume()
         }
         func close(_ code:CloseCode,reason:CloseReason){
@@ -270,7 +272,9 @@ extension WebSocket{
                 return
             }
             self.task?.cancel(with: code, reason: nil)
-            self.doRetry(code: code, reason: reason)
+            socket.queue.async {
+                self.doRetry(code: code, reason: reason)
+            }
         }
         /// Internal method run in delegate queue
         private func receve(){
@@ -318,7 +322,7 @@ extension WebSocket{
             self.retrying = true
             self.socket.queue.asyncAfter(deadline: .now() + delay){
                 self.status = .opening
-                self.task = self.session.webSocketTask(with:self.request)
+                self.task = self.impl.webSocketTask(with:self.request)
                 self.task?.resume()
                 self.retrying = false
             }
@@ -400,12 +404,12 @@ extension WebSocket{
     /// A  standard  implementation of `WebSocketPinging` protocol
     public final class Pinging:NSObject,WebSocketPinging{
         private weak var socket:WebSocket!
-        public var timeout:TimeInterval = 3
-        public var interval:TimeInterval = 5
-        @Atomic
-        private var pongRecived:Bool = false
-        @Atomic
-        private var suspended = false;
+        @Atomic private var pongRecived:Bool = false
+        @Atomic private var suspended = false
+        /// ping timeout in secends
+        @Atomic public var timeout:TimeInterval = 3
+        /// ping interval after last ping
+        @Atomic public var interval:TimeInterval = 2
         required public init(_ socket: WebSocket) {
             super.init()
             self.socket = socket
@@ -430,11 +434,13 @@ extension WebSocket{
                     self.pongRecived = true
                 }
             })
-            self.socket.queue.asyncAfter(deadline: .now()+self.timeout){
+            self.socket.queue.asyncAfter(deadline: .now() + self.timeout  ){
                 if !self.pongRecived{
                     self.socket.close(.pinging)
                 }
-                self.start()
+                self.socket.queue.asyncAfter(deadline: .now() + self.interval){
+                    self.start()
+                }
             }
         }
     }
@@ -484,7 +490,6 @@ extension WebSocket{
     @propertyWrapper public final class Atomic<T> {
         private let lock: os_unfair_lock_t
         private var value: T
-        public var projectedValue: Atomic<T> { self }
         deinit {
             lock.deinitialize(count: 1)
             lock.deallocate()
@@ -502,11 +507,6 @@ extension WebSocket{
             os_unfair_lock_lock(lock)
             defer { os_unfair_lock_unlock(lock) }
             return closure()
-        }
-        private func around(_ closure: () -> Void) {
-            os_unfair_lock_lock(lock)
-            defer { os_unfair_lock_unlock(lock) }
-            closure()
         }
     }
 }

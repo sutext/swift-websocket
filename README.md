@@ -2,7 +2,7 @@
 
 ![Platform](https://img.shields.io/badge/platforms-iOS%2013.0%20%7C%20macOS%2010.15%20%7C%20tvOS%2013.0%20%7C%20watchOS%206.0-F28D00.svg)
 
-swift-websocket A WebSocket Client in swift. Add auto ping pong and keep alive implementation
+swift-websocket A WebSocket Client in swift. Add auto ping pong and retry implementation
 
 ## Requirements
 
@@ -43,7 +43,6 @@ import WebSocket
 final class CustomPinging:NSObject,WebSocketPinging{
     private weak var socket:WebSocket!
     public var timeout:TimeInterval = 5
-    public var interval:TimeInterval = 8
     @WebSocket.Atomic
     private var pongRecived:Bool = false
     @WebSocket.Atomic
