@@ -1,6 +1,7 @@
 import XCTest
 @testable import WebSocket
 class Client{
+    static let shared = Client()
     let socket:WebSocket = .init("ws://127.0.0.1:8088")
     init(){
         self.socket.delegate = self
@@ -20,9 +21,15 @@ class Client{
 }
 extension Client:WebSocketDelegate{
     func socket(_ socket: WebSocket, didUpdate status: WebSocket.Status,old:WebSocket.Status) {
-        print("didUpdateStatusFrom:",old,"to:",status)
-        if case .opened = status{
+        print("didUpdateStatus from:",old,"to:",status)
+        switch status{
+        case .opened:
+            self.socket.pinging?.resume()
             socket.send(message: "hello")
+        case .opening:
+            self.socket.pinging?.suspend()
+        case .closed:
+            self.socket.pinging?.suspend()
         }
     }
     func socket(_ socket: WebSocket, didReceive message: WebSocket.Message) {
@@ -37,11 +44,9 @@ extension Client:WebSocketDelegate{
     }
 }
 final class WebSocketTests: XCTestCase {
-    
     func testExample() throws {
-        let client = Client()
-        client.connect()
-        sleep(1000)
+        Client.shared.connect()
+        sleep(2)
         // This is an example of a functional test case.
         // Use XCTAssert and related functions to verify your tests produce the correct
         // results.

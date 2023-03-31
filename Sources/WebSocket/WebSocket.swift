@@ -19,6 +19,7 @@ public protocol WebSocketDelegate:AnyObject{
     /// Any message callback
     func socket(_ socket:WebSocket, didReceive message:WebSocket.Message)
     /// Custom TLS handshake `@see URLSession URLAuthenticationChallenge API`
+    /// - Important: This method will becall in `innerQueue`
     func socket(_ socket:WebSocket, didReceive challenge:WebSocket.Challenge)->WSChallengeResult
 }
 
@@ -32,26 +33,25 @@ public extension WebSocketDelegate{
 }
 
 /// WebSocket ping pong protocol @see `WebSocket.Pinging` for implementation
-///
-///- Important All function will be call in `socket.queue`. It's best not to call directly
 public protocol WebSocketPinging{
-    init(_ socket:WebSocket)
-    func onRecive(message:WebSocket.Message)
     func resume()
     func suspend()
+    func onRecive(message:WebSocket.Message)
 }
 
 // MARK: - Public definition
 /// A WebSocket implementation on iOS13 base on URLSessionWebSocketTask
 /// Add auto ping pong and retry implementation
 public final class WebSocket{
-    /// Internal runing  queue
-    let rootQueue:DispatchQueue
+    /// Internal process  queue
+    let innerQueue:DispatchQueue
+    private let params:Params
     /// internal session implementation
     private let session:Session
     /// Internal monitor implementation
     private var monitor:Monitor?
-    
+    /// current websocket url
+    public var url:URL? { params.url }
     /// the delegate callback queue.
     public var queue:DispatchQueue = .main
     /// current websocket statuss
@@ -59,27 +59,32 @@ public final class WebSocket{
     /// is connection available
     public var isConnected:Bool { status == .opened }
     /// current websocket request
-    public var request:URLRequest { session.request }
+    public var request:URLRequest? { params.req }
     /// config the retry policy by default never retry
     public var retrier:Retrier? = nil
     /// ping pong mechanism protocol. You can use` WebSocket.Pinging` by default.
     public var pinging:WebSocketPinging? = nil
+    /// sub protocols witch will be add to `Sec-WebSocket-Protocol`, ` take effect when init with url`
+    public var protocols:[String] = []
     /// websocket call back delegate
     /// - Important  All delegate method will callback in  delegate queue
     public weak var delegate:WebSocketDelegate?
-    
     /// convenience init with string
-    public convenience init(_ url:String,timeout:TimeInterval = 6){
-        self.init(URLRequest(url: URL(string: url)!, timeoutInterval: timeout))
+    public convenience init(_ url:String){
+        self.init(URL(string: url)!)
     }
-    /// convenience init with url
-    public convenience init(_ url:URL,timeout:TimeInterval = 6){
-        self.init(URLRequest(url: url, timeoutInterval: timeout))
+    /// init with URL
+    public init(_ url:URL){
+        self.session = Session()
+        self.params = .url(url)
+        self.innerQueue = .init(label: "swift.websocket.\(UUID().uuidString)",attributes: .concurrent)
+        self.session.socket = self
     }
     /// init with URLRequest
     public init(_ request:URLRequest){
-        self.session = .init(request)
-        self.rootQueue = .init(label: "swift.websocket.\(UUID().uuidString)",attributes: .concurrent)
+        self.session = Session()
+        self.params = .req(request)
+        self.innerQueue = .init(label: "swift.websocket.\(UUID().uuidString)",attributes: .concurrent)
         self.session.socket = self
     }
     /// update the internal session and configuration
@@ -153,10 +158,8 @@ public final class WebSocket{
         }
     }
     func challenge(_ challenge:Challenge,completion:((WSChallengeResult)->Void)?){
-        self.queue.async {
-            if let result = self.delegate?.socket(self, didReceive: challenge){
-                completion?(result)
-            }
+        if let result = self.delegate?.socket(self, didReceive: challenge){
+            completion?(result)
         }
     }
 }
@@ -312,15 +315,11 @@ extension WebSocket{
 extension WebSocket{
     /// internal implementation
     class Session:NSObject{
-        let request: URLRequest
         weak var socket: WebSocket!
         private let lock:NSLock = NSLock()
         private var retryTimes: UInt8 = 0
         private var retrying: Bool = false
         private(set) var task:URLSessionWebSocketTask?
-        init(_ request:URLRequest) {
-            self.request = request
-        }
         private(set) var status:Status = .closed(.normalClosure,nil){
             didSet{
                 if oldValue != status {
@@ -328,13 +327,10 @@ extension WebSocket{
                     case .opened:
                         self.receve()
                         self.retryTimes = 0
-                        self.socket.pinging?.resume()
                     case .closed:
                         self.retryTimes = 0
                         self.task = nil
-                        self.socket.pinging?.suspend()
                     case .opening:
-                        self.socket.pinging?.suspend()
                         break
                     }
                     self.socket.notify(status: status, old: oldValue)
@@ -345,7 +341,7 @@ extension WebSocket{
             let config = URLSessionConfiguration.default
             config.httpShouldUsePipelining = true
             let queue = OperationQueue()
-            queue.underlyingQueue = socket.rootQueue
+            queue.underlyingQueue = socket.innerQueue
             queue.qualityOfService = .default
             queue.maxConcurrentOperationCount = 3
             return URLSession(configuration: config,delegate: self,delegateQueue: queue)
@@ -355,9 +351,7 @@ extension WebSocket{
             guard case .closed = status else {
                 return
             }
-            status = .opening
-            self.task = self.impl.webSocketTask(with:self.request)
-            self.task?.resume()
+            self.resumeTask()
         }
         func close(_ code:CloseCode,reason:CloseReason?){
             self.lock.lock(); defer { self.lock.unlock() }
@@ -365,9 +359,23 @@ extension WebSocket{
                 return
             }
             self.task?.cancel(with: code.wscode, reason: nil)
-            self.socket.rootQueue.async {
+            self.socket.innerQueue.async {
                 self.doRetry(code: code, reason: reason)
             }
+        }
+        private func resumeTask(){
+            status = .opening
+            switch socket.params{
+            case .url(let u):
+                if socket.protocols.count>0{
+                    self.task = self.impl.webSocketTask(with:u,protocols: socket.protocols)
+                }else{
+                    self.task = self.impl.webSocketTask(with:u)
+                }
+            case .req(let r):
+                self.task = self.impl.webSocketTask(with: r)
+            }
+            self.task?.resume()
         }
         /// Internal method run in delegate queue
         private func receve(){
@@ -413,10 +421,8 @@ extension WebSocket{
                 return
             }
             self.retrying = true
-            self.socket.rootQueue.asyncAfter(deadline: .now() + delay){
-                self.status = .opening
-                self.task = self.impl.webSocketTask(with:self.request)
-                self.task?.resume()
+            self.socket.innerQueue.asyncAfter(deadline: .now() + delay){
+                self.resumeTask()
                 self.retrying = false
             }
         }
@@ -435,7 +441,7 @@ extension WebSocket.Session:URLSessionWebSocketDelegate{
     
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
         guard task ==  self.task,let error else { return }
-        socket.rootQueue.async {
+        socket.innerQueue.async {
             self.doRetry(code: .invalid,reason: .init(error: error))
         }
     }
@@ -511,7 +517,7 @@ extension WebSocket{
 // MARK: - Standard ping pong implementation
 extension WebSocket{
     /// A  standard  implementation of `WebSocketPinging` protocol
-    public final class Pinging:NSObject,WebSocketPinging{
+    public final class Pinging:WebSocketPinging{
         private weak var socket:WebSocket!
         private var pongRecived:Bool = false
         private var suspended = false
@@ -519,8 +525,7 @@ extension WebSocket{
         public var timeout:TimeInterval = 3
         /// ping interval after last ping
         public var interval:TimeInterval = 2
-        required public init(_ socket: WebSocket) {
-            super.init()
+        public init(_ socket: WebSocket) {
             self.socket = socket
         }
         public func resume(){
@@ -543,11 +548,11 @@ extension WebSocket{
                     self.pongRecived = true
                 }
             })
-            self.socket.rootQueue.asyncAfter(deadline: .now() + self.timeout  ){
+            self.socket.queue.asyncAfter(deadline: .now() + self.timeout  ){
                 if !self.pongRecived{
                     self.socket.close(.pinging)
                 }
-                self.socket.rootQueue.asyncAfter(deadline: .now() + self.interval){
+                self.socket.queue.asyncAfter(deadline: .now() + self.interval){
                     self.start()
                 }
             }
@@ -556,6 +561,22 @@ extension WebSocket{
 }
 
 extension WebSocket{
+    enum Params{
+        case url(URL)
+        case req(URLRequest)
+        var url:URL?{
+            if case .url(let u) = self {
+                return u
+            }
+            return nil
+        }
+        var req:URLRequest?{
+            if case .req(let r) = self {
+                return r
+            }
+            return nil
+        }
+    }
     class Monitor{
         private weak var socket:WebSocket!
         private let m = NWPathMonitor()
@@ -584,7 +605,7 @@ extension WebSocket{
         }
         func start(){
             if m.queue == nil {
-                m.start(queue: socket.rootQueue)
+                m.start(queue: socket.innerQueue)
             }
         }
         func stop(){
