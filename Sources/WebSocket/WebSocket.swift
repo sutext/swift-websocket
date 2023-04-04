@@ -50,7 +50,7 @@ public final class WebSocket{
     private let session:Session
     /// Internal monitor implementation
     private var monitor:Monitor?
-    /// current websocket url
+    /// current websocket url when init with url
     public var url:URL? { params.url }
     /// the delegate callback queue.
     public var queue:DispatchQueue = .main
@@ -58,7 +58,7 @@ public final class WebSocket{
     public var status:Status { session.status }
     /// is connection available
     public var isConnected:Bool { status == .opened }
-    /// current websocket request
+    /// current websocket request when init with request
     public var request:URLRequest? { params.req }
     /// config the retry policy by default never retry
     public var retrier:Retrier? = nil
@@ -100,7 +100,9 @@ public final class WebSocket{
     ///    - monitor: use monitor or not. `false` by default
     public func using(monitor:Bool){
         if monitor{
-            self.monitor = self.monitor ?? Monitor(self)
+            if self.monitor == nil{
+                self.monitor = Monitor(self)
+            }
             self.monitor?.start()
         }else{
             self.monitor?.stop()
@@ -518,42 +520,54 @@ extension WebSocket{
 extension WebSocket{
     /// A  standard  implementation of `WebSocketPinging` protocol
     public final class Pinging:WebSocketPinging{
+        private var delay:Delay? = nil
         private weak var socket:WebSocket!
         private var pongRecived:Bool = false
-        private var suspended = false
         /// ping timeout in secends
         public var timeout:TimeInterval = 3
         /// ping interval after last ping
-        public var interval:TimeInterval = 2
+        public var interval:TimeInterval = 3
         public init(_ socket: WebSocket) {
             self.socket = socket
         }
         public func resume(){
-            self.suspended = false
-            self.start()
+            if self.delay == nil{
+                self.sendPing()
+            }
         }
         public func suspend(){
-            self.suspended = true
+            self.delay = nil // cancel running delay tasks
         }
         public func onRecive(message:Message){
             ///  Use this method when custom ping pong
         }
-        private func start(){
-            if self.suspended {
-                return
+        private func checkPong(){
+            if !self.pongRecived{
+                self.socket.close(.pinging)
             }
+        }
+        private func sendPing(){
             self.pongRecived = false
             self.socket.send(ping: { err in
                 if err == nil {
                     self.pongRecived = true
                 }
             })
-            self.socket.queue.asyncAfter(deadline: .now() + self.timeout  ){
-                if !self.pongRecived{
-                    self.socket.close(.pinging)
-                }
-                self.socket.queue.asyncAfter(deadline: .now() + self.interval){
-                    self.start()
+            self.delay = Delay(t1: timeout, t2: interval, step1: checkPong, step2: sendPing)
+        }
+        private class Delay {
+            private var step1:(()->Void)?
+            private var step2:(()->Void)?
+            init(t1:TimeInterval,t2:TimeInterval,step1:(()->Void)?,step2:(()->Void)?) {
+                self.step1 = step1
+                self.step2 = step2
+                DispatchQueue.global().asyncAfter(deadline: .now() + t1){[weak self] in
+                    guard let self else { return }
+                    self.step1?()
+                    DispatchQueue.global().asyncAfter(deadline: .now() + t2){[weak self] in
+                        guard let self else { return }
+                        self.step2?()
+                    }
                 }
             }
         }
