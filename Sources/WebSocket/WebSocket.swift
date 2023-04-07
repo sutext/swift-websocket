@@ -56,8 +56,6 @@ public final class WebSocket{
     public var queue:DispatchQueue = .main
     /// current websocket statuss
     public var status:Status { session.status }
-    /// is connection available
-    public var isConnected:Bool { status == .opened }
     /// current websocket request when init with request
     public var request:URLRequest? { params.req }
     /// config the retry policy by default never retry
@@ -65,10 +63,17 @@ public final class WebSocket{
     /// ping pong mechanism protocol. You can use` WebSocket.Pinging` by default.
     public var pinging:WebSocketPinging? = nil
     /// sub protocols witch will be add to `Sec-WebSocket-Protocol`, ` take effect when init with url`
-    public var protocols:[String] = []
+    public var protocols:[SecProtocol] = []
     /// websocket call back delegate
     /// - Important  All delegate method will callback in  delegate queue
     public weak var delegate:WebSocketDelegate?
+    /// is connection available
+    public var isConnected:Bool {
+        if case .opened = session.status{
+            return true
+        }
+        return false
+    }
     /// convenience init with string
     public convenience init(_ url:String){
         self.init(URL(string: url)!)
@@ -113,21 +118,21 @@ public final class WebSocket{
     ///
     /// - Parameters:
     ///    - reason: the close reason.
-    public func close(_ reason:CloseReason? = nil){
-        session.close(.normalClosure,reason: reason)
+    public func close(_ code:CloseCode = .normalClosure,reason:CloseReason? = nil){
+        session.close(code,reason: reason)
     }
     /// send string message
-    public func send(message:String,finish:((Swift.Error?)->Void)? = nil){
+    public func send(message:String,finish:((Error?)->Void)? = nil){
         send(message: .string(message),finish: finish)
     }
     /// Send binary data
-    public func send(data:Data,finish:((Swift.Error?)->Void)? = nil){
+    public func send(data:Data,finish:((Error?)->Void)? = nil){
         send(message: .data(data),finish: finish)
     }
     /// Send message to the server
-    public func send(message:Message,finish:((Swift.Error?)->Void)? = nil){
+    public func send(message:Message,finish:((Error?)->Void)? = nil){
         guard case .opened = session.status else{
-            finish?(Error.notOpened)
+            finish?(NSError.WebScoketNotOpened)
             return
         }
         session.task?.send(message, completionHandler: { err in
@@ -137,9 +142,9 @@ public final class WebSocket{
     /// Send ping frame to server
     /// - Parameters:
     ///    - onPong: callback when recived pong frame
-    public func send(ping onPong:@escaping (Swift.Error?)->Void){
+    public func send(ping onPong:@escaping (Error?)->Void){
         guard case .opened = session.status else{
-            onPong(Error.notOpened)
+            onPong(NSError.WebScoketNotOpened)
             return
         }
         session.task?.sendPing(pongReceiveHandler: onPong)
@@ -154,7 +159,7 @@ public final class WebSocket{
             self.delegate?.socket(self, didReceive: message)
         }
     }
-    func notify(error:Swift.Error){
+    func notify(error:Error){
         self.queue.async {
             self.delegate?.socket(self, didReceive: error)
         }
@@ -175,12 +180,16 @@ public enum WSChallengeResult{
     /* Use the specified credential */
     case useCredential(URLCredential)
 }
-
+public extension NSError{
+    static let WebScoketNotOpened:NSError = .init(domain:"WebScoketNotOpened" , code: 0)
+}
 // MARK: - Type definitions
 extension WebSocket{
     public typealias Message = URLSessionWebSocketTask.Message
     public typealias Challenge = URLAuthenticationChallenge
+    public typealias SecProtocol = String // Sec-WebScocket-Protocol
     public enum CloseCode:RawRepresentable,Codable,Equatable,Hashable{
+        /// this code will never been send to server. Use for custom `reason` logic like `pinging` `monitor`  `error(code,domain)`
         case invalid //0
         case normalClosure//1000
         case goingAway//1001
@@ -249,18 +258,21 @@ extension WebSocket{
             .init(rawValue: rawValue) ?? .invalid
         }
     }
-    public enum Error:Swift.Error{
-        case notOpened
-    }
     /// state machine
     public enum Status:Equatable,CustomStringConvertible{
-        case opened
-        case closed(CloseCode,CloseReason?)
+        case opened(SecProtocol?)
         case opening
+        case closed(CloseCode,CloseReason?)
+        case closing
         public var description: String{
             switch self{
             case .opening: return "opening"
-            case .opened: return "opened"
+            case .closing: return "closing"
+            case .opened(let proto):
+                if let proto{
+                    return "opened(\(proto))"
+                }
+                return "opened"
             case let .closed(code, reason):
                 if let reason{
                     return "closed(\(code.rawValue),\(reason))"
@@ -270,44 +282,41 @@ extension WebSocket{
         }
     }
     /// WehSocket close reason
-    public enum CloseReason:Codable,Equatable,CustomStringConvertible{
+    public enum CloseReason:Equatable,CustomStringConvertible{
         /// close when ping pong fail
         case pinging
         /// auto close by network monitor when network unsatisfied
         case monitor
-        /// close when network layer error. `String is error message`
-        case error(String)
-        /// close when server reason `Data is server close reason data`
-        case server(Data?)
-        /// create from error
-        public init(error:Swift.Error){
-            let err  = error as NSError
-            self = .error("\(err.domain)(\(err.code)")
-        }
-        /// create from sseion delegate reason data
-        /// only internal available
-        init(data:Data?){
-            guard let data else{
-                self = .server(nil)
-                return
-            }
-            guard let reason = try? JSONDecoder().decode(CloseReason.self, from: data) else{
+        /// close when network layer error.
+        case error(code:Int,domain:String)
+        /// reason data` from server` or send `to server`
+        case server(Data)
+        /// create with optional server data
+        public init?(server data:Data?){
+            if let data{
                 self = .server(data)
-                return
             }
-            self = reason
+            return nil
+        }
+        /// create from error
+        public init(error:Error){
+            let err  = error as NSError
+            self = .error(code: err.code,domain: err.domain)
         }
         /// to reason data
         /// only internal available
-        var data:Data?{
-            try? JSONEncoder().encode(self)
+        public var data:Data?{
+            if case .server(let data) = self {
+                return data
+            }
+            return nil
         }
         public var description: String{
             switch self{
             case .monitor: return "monitor"
             case .pinging: return "pinging"
-            case .server(let data): return "server(\(data==nil ? "nil" : "\(data!.count)bytes"))"
-            case .error(let str): return "error(\(str))"
+            case .error(let code,let domain): return "error(code:\(code),domain:\(domain))"
+            case .server(let data): return "server(\(data.count)bytes)"
             }
         }
     }
@@ -327,12 +336,14 @@ extension WebSocket{
                 if oldValue != status {
                     switch status{
                     case .opened:
-                        self.receve()
+                        self.recive()
                         self.retryTimes = 0
                     case .closed:
                         self.retryTimes = 0
                         self.task = nil
                     case .opening:
+                        self.task = nil
+                    case .closing:
                         break
                     }
                     self.socket.notify(status: status, old: oldValue)
@@ -350,23 +361,36 @@ extension WebSocket{
         }()
         func open(){
             self.lock.lock(); defer { self.lock.unlock() }
-            guard case .closed = status else {
+            switch self.status{
+            case .opening,.opened:
                 return
+            default:
+                break
             }
+            self.status = .opening
             self.resumeTask()
         }
         func close(_ code:CloseCode,reason:CloseReason?){
             self.lock.lock(); defer { self.lock.unlock() }
-            if case .closed = status{
+            switch self.status{
+            case .closing,.closed:
+                return
+            default:
+                break
+            }
+            if case .invalid = code{
+                self.doRetry(code: code, reason: reason)
                 return
             }
-            self.task?.cancel(with: code.wscode, reason: nil)
-            self.socket.innerQueue.async {
+            switch self.task?.state{
+            case .completed,.canceling:
                 self.doRetry(code: code, reason: reason)
+            default:
+                self.status = .closing
+                self.task?.cancel(with: code.wscode, reason: reason?.data)
             }
         }
         private func resumeTask(){
-            status = .opening
             switch socket.params{
             case .url(let u):
                 if socket.protocols.count>0{
@@ -380,24 +404,22 @@ extension WebSocket{
             self.task?.resume()
         }
         /// Internal method run in delegate queue
-        private func receve(){
-            guard self.task?.state  == .running else{ return }
-            self.task?.receive { [weak self] (result) in
-                guard let self else { return }
+        private func recive(){
+            guard let task = self.task,task.state  == .running else { return }
+            task.receive { [weak self,weak task] (result) in
+                guard let self,let task,self.task === task else { return } //invalid last task recive
                 switch result {
                 case .success(let message):
                     self.socket.pinging?.onRecive(message: message)
                     self.socket.notify(message: message)
-                    self.receve()
+                    self.recive()
                 case .failure(let error):
                     self.socket.notify(error: error)
-                    self.task?.cancel()
                 }
             }
         }
         /// Internal method run in delegate queue
         private func doRetry(code:CloseCode,reason:CloseReason?){
-            self.lock.lock(); defer { self.lock.unlock() }
             if self.retrying{
                 return
             }
@@ -406,7 +428,12 @@ extension WebSocket{
                 status = .closed(code,reason)
                 return
             }
-            // not retry when reason is nil(user close)
+            // not retry when close normaly
+            if case .normalClosure = code{
+                status = .closed(code,reason)
+                return
+            }
+            // not retry when reason is nil(close no reason)
             guard let reason else{
                 status = .closed(code, nil)
                 return
@@ -418,11 +445,12 @@ extension WebSocket{
             }
             // not retry when limits
             self.retryTimes += 1
-            guard let delay = retrier.retry(when: code, reason: reason, times: self.retryTimes) else{
+            guard let delay = retrier.retry(when: reason, code: code, times: self.retryTimes) else{
                 status = .closed(code,reason)
                 return
             }
             self.retrying = true
+            self.status = .opening
             self.socket.innerQueue.asyncAfter(deadline: .now() + delay){
                 self.resumeTask()
                 self.retrying = false
@@ -434,16 +462,18 @@ extension WebSocket.Session:URLSessionWebSocketDelegate{
     func urlSession(_ session: URLSession, webSocketTask: URLSessionWebSocketTask, didOpenWithProtocol protocol: String?) {
         guard webSocketTask ==  self.task else { return }
         self.lock.lock(); defer { self.lock.unlock() }
-        self.status = .opened
+        self.status = .opened(`protocol`)
     }
     func urlSession(_ session: URLSession, webSocketTask: URLSessionWebSocketTask, didCloseWith closeCode: URLSessionWebSocketTask.CloseCode, reason: Data?) {
         guard webSocketTask ==  self.task else { return }
-        doRetry(code: .init(rawValue: closeCode.rawValue),reason: .init(data: reason))
+        self.lock.lock(); defer { self.lock.unlock() }
+        doRetry(code: .init(rawValue: closeCode.rawValue),reason: .init(server: reason))
     }
     
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
         guard task ==  self.task,let error else { return }
         socket.innerQueue.async {
+            self.lock.lock(); defer { self.lock.unlock() }
             self.doRetry(code: .invalid,reason: .init(error: error))
         }
     }
@@ -497,7 +527,7 @@ extension WebSocket{
             case exponential(base:Int,scale:Double)
         }
         /// get retry delay. nil means not retry
-        func retry(when code:CloseCode,reason:CloseReason,times:UInt8) -> TimeInterval? {
+        func retry(when reason:CloseReason,code:CloseCode,times:UInt8) -> TimeInterval? {
             if self.filter?(code,reason) == true {
                 return nil
             }
@@ -543,7 +573,7 @@ extension WebSocket{
         }
         private func checkPong(){
             if !self.pongRecived{
-                self.socket.close(.pinging)
+                self.socket.close(.invalid,reason: .pinging)
             }
         }
         private func sendPing(){
@@ -611,7 +641,7 @@ extension WebSocket{
                         socket.open()
                     }
                 case .unsatisfied:
-                    socket.close(.monitor)
+                    socket.close(.invalid,reason: .monitor)
                 default:
                     break
                 }
