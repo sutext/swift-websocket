@@ -203,7 +203,11 @@ extension WebSocket{
         case mandatoryExtensionMissing//1010
         case internalServerError//1011
         case tlsHandshakeFailure//1015
-        case custom(Int)//Follow ws protocol this custom code need greater than 4000
+        case reserved(Int)//1016...1999 Reserved by websocket
+        case extensionReserved(Int)//2000...2999 Reserved by websocket extension
+        case thirdFramework(Int)//3000...3999 Defined by a library or framework.  Registration is available at IANA on a first-come, first-served basis
+        case application(Int)//4000...4999 Defined by application
+        case undefined(Int)//1...999 1004 5000... Reserved by websocket. It's undefined and meaningless
         public var rawValue: Int{
             switch self{
             case .invalid: return 0
@@ -219,13 +223,15 @@ extension WebSocket{
             case .mandatoryExtensionMissing: return 1010
             case .internalServerError: return 1011
             case .tlsHandshakeFailure: return 1015
-            case .custom(let value): return value
+            case .reserved(let value): return value
+            case .extensionReserved(let value): return value
+            case .thirdFramework(let value): return value
+            case .application(let value): return value
+            case .undefined(let value): return value
             }
         }
         public init(rawValue: Int) {
             switch rawValue{
-            case 0:
-                self = .invalid
             case 1000:
                 self = .normalClosure
             case 1001:
@@ -250,12 +256,25 @@ extension WebSocket{
                 self = .internalServerError
             case 1015:
                 self = .tlsHandshakeFailure
+            case 1016...1999: // Reserved by websocket protocol
+                self = .reserved(rawValue)
+            case 2000...2999: // Reserved by websocket extension protocol
+                self = .extensionReserved(rawValue)
+            case 3000...3999: // Defined by a library or framework
+                self = .thirdFramework(rawValue)
+            case 4000...4999: // Defined by application
+                self = .application(rawValue)
             default:
-                self = .custom(rawValue)
+                self = .invalid
             }
         }
-        fileprivate var wscode:URLSessionWebSocketTask.CloseCode{
-            .init(rawValue: rawValue) ?? .invalid
+        var toServer:URLSessionWebSocketTask.CloseCode?{
+            switch self.rawValue{
+            case 1000...1003, 1007...1011, 3000...4999:
+                return .init(rawValue: rawValue)
+            default:
+                return nil
+            }
         }
     }
     /// state machine
@@ -293,10 +312,10 @@ extension WebSocket{
         case server(Data)
         /// create with optional server data
         public init?(server data:Data?){
-            if let data{
-                self = .server(data)
+            guard let data else{
+                return nil
             }
-            return nil
+            self = .server(data)
         }
         /// create from error
         public init(error:Error){
@@ -378,16 +397,16 @@ extension WebSocket{
             default:
                 break
             }
-            if case .invalid = code{
-                self.doRetry(code: code, reason: reason)
-                return
-            }
             switch self.task?.state{
             case .completed,.canceling:
                 self.doRetry(code: code, reason: reason)
             default:
                 self.status = .closing
-                self.task?.cancel(with: code.wscode, reason: reason?.data)
+                if let c = code.toServer{
+                    self.task?.cancel(with: c, reason: reason?.data)
+                }else{
+                    self.doRetry(code: code, reason: reason)
+                }
             }
         }
         private func resumeTask(){
@@ -425,11 +444,6 @@ extension WebSocket{
             }
             // not retry when network unsatisfied
             if let monitor = socket.monitor, monitor.status == .unsatisfied{
-                status = .closed(code,reason)
-                return
-            }
-            // not retry when close normaly
-            if case .normalClosure = code{
                 status = .closed(code,reason)
                 return
             }

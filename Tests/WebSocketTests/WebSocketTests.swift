@@ -27,9 +27,7 @@ extension Client:WebSocketDelegate{
         case .opened:
             self.socket.pinging?.resume()
             socket.send(message: "hello")
-        case .opening:
-            self.socket.pinging?.suspend()
-        case .closed:
+        case .opening,.closing,.closed:
             self.socket.pinging?.suspend()
         }
     }
@@ -44,9 +42,24 @@ extension Client:WebSocketDelegate{
         }
     }
 }
+extension URLSessionWebSocketTask.CloseCode{
+    var isInvalid:Bool{
+        if case .invalid = self{
+            return true
+        }
+        return false
+    }
+}
 final class WebSocketTests: XCTestCase {
     func testExample() throws {
         Client.shared.connect()
         sleep(1000)
+    }
+    func testCloseCode(){
+        let code = WebSocket.CloseCode.init(rawValue: 1007)
+        print(code.toServer as Any)
+        for i in 1000...1099{
+            print(URLSessionWebSocketTask.CloseCode(rawValue: i)?.rawValue ?? -1)
+        }
     }
 }
