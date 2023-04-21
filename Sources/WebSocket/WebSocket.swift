@@ -514,7 +514,7 @@ extension WebSocket{
         /// retry delay policy
         public let policy:Policy
         /// retry limit times
-        public let limits:UInt8
+        public let limits:UInt
         /// fillter when check  retry
         ///
         /// - Important: return true means no retry
@@ -527,7 +527,7 @@ extension WebSocket{
         ///    - limits:max retry times
         ///    - filter:filter retry when some code and reasons
         ///
-        public init(_ policy:Policy = .linear(scale: 0.6),limits:UInt8 = 10,filter:Filter? = nil){
+        public init(_ policy:Policy = .linear(scale: 0.6),limits:UInt = 10,filter:Filter? = nil){
             self.limits = limits
             self.policy = policy
             self.filter = filter
@@ -537,6 +537,8 @@ extension WebSocket{
             case linear(scale:Double)
             /// The retry time does not grow. Use equal time interval
             case equals(interval:TimeInterval)
+            /// The retry time random in min...max
+            case random(min:TimeInterval,max:TimeInterval)
             /// The retry time grows exponentially
             case exponential(base:Int,scale:Double)
         }
@@ -553,6 +555,8 @@ extension WebSocket{
                 return scale * Double(times)
             case .equals(let time):
                 return time
+            case .random(let min,let max):
+                return TimeInterval.random(in: min...max)
             case .exponential(let base, let scale):
                 return pow(Double(base),Double(times))*scale
             }
