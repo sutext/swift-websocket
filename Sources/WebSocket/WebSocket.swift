@@ -347,7 +347,7 @@ extension WebSocket{
     class Session:NSObject{
         weak var socket: WebSocket!
         private let lock:NSLock = NSLock()
-        private var retryTimes: UInt8 = 0
+        private var retryTimes: UInt = 0
         private var retrying: Bool = false
         private(set) var task:URLSessionWebSocketTask?
         private(set) var status:Status = .closed(.normalClosure,nil){
@@ -543,7 +543,7 @@ extension WebSocket{
             case exponential(base:Int,scale:Double)
         }
         /// get retry delay. nil means not retry
-        func retry(when reason:CloseReason,code:CloseCode,times:UInt8) -> TimeInterval? {
+        func retry(when reason:CloseReason,code:CloseCode,times:UInt) -> TimeInterval? {
             if self.filter?(code,reason) == true {
                 return nil
             }
